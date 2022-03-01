@@ -29,58 +29,92 @@
 .section .start, "ax"
 .globl start
 start:
-	/* First, verify the process binary was loaded at the correct address. The
-	 * check is performed by comparing the program counter at the start to the
-	 * address of `start`, which is stored in rt_header. */
-	auipc s0, 0            /* s0 = pc */
-	mv a5, a0;             /* Save rt_header so syscalls don't overwrite it */
-	lw s1, 0(a5)           /* s1 = rt_header.start */
-	beq s0, s1, .Lset_brk  /* Skip error handling code if pc is correct */
-	/* If the beq on the previous line did not jump, then the binary is not at
-	 * the correct location. Report the error via LowLevelDebug then exit. */
-	li a0, 8  /* LowLevelDebug driver number */
-	li a1, 1  /* Command: Print alert code */
-	li a2, 2  /* Alert code 2 (incorrect location) */
-	li a4, 2  /* `command` class */
-	ecall
-	li a0, 0  /* exit-terminate */
-	/* TODO: Set a completion code, once completion codes are decided */
-	li a4, 6  /* `exit` class */
-	ecall
+    /* Compute the stack top.
+     *
+     * struct hdr* myhdr = (struct hdr*) app_start;
+     * uint32_t stacktop = (((uint32_t) mem_start + myhdr->stack_size + 7) & 0xfffffff8);
+	 */
+    lw t0, 36(a0)
+    addi t0, t0, 7
+    add t0, t0, a1
+    li t1, 7
+    not t1, t1
+    and t0, t0, t1
+    
+    /* Compute the app data size and where initial app brk should go.
+     * This includes the GOT, data, and BSS sections. However, we can't be sure
+     * the linker puts them back-to-back, but we do assume that BSS is last
+     * (i.e. myhdr->got_start < myhdr->bss_start && myhdr->data_start <
+     * myhdr->bss_start). With all of that true, then the size is equivalent
+     * to the end of the BSS section.
+	 * 
+	 * uint32_t app_brk = mem_start + myhdr->bss_start + myhdr->bss_size;
+     */
+    lw t1, 24(a0)
+    lw t2, 28(a0)
+    add t1, t1, t2
+    add t1, t1, a1
+    
+    /* Move arguments we need to keep over to callee-saved locations. */
+    mv   s0, a0
+    mv   s1, t0
+    mv   s2, a1
+    
+    /* Now we may want to move the stack pointer. If the kernel set the
+     * `app_heap_break` larger than we need (and we are going to call `brk()`
+     * to reduce it) then our stack pointer will fit and we can move it now.
+     * Otherwise after the first syscall (the memop to set the brk), the return
+     * will use a stack that is outside of the process accessible memory.
+	 * Compare `app_heap_break` with new brk.
+	 * If our current `app_heap_break` is larger
+	 * then we need to move the stack pointer
+	 * before we call the `brk` syscall.
+     */
+    bgt t1, a3, skip_set_sp
+	/* Update the stack pointer */
+    mv  sp, t0
 
-.Lset_brk:
-	/* memop(): set brk to rt_header's initial break value */
-	li a0, 0      /* operation: set break */
-	lw a1, 4(a5)  /* rt_header's initial process break */
-	li a4, 5      /* `memop` class */
-	ecall
+	/* Back to regularly scheduled programming. */
+    skip_set_sp:
 
-	/* Set the stack pointer */
-	lw sp, 8(a5)  /* sp = rt_header._stack_top */
+    /* Call `brk` to set to requested memory
+     * memop(0, stacktop + appdata_size);
+	 */
+    li  a4, 5
+    li  a0, 0
+    mv  a1, t1
+    ecall
+    
+    /* Setup initial stack pointer for normal execution
+	 */
+    mv   sp, s1
 
-	/* Copy .data into place. */
-	lw a0, 12(a5)              /* remaining = rt_header.data_size */
-	beqz a0, .Lzero_bss        /* Jump to zero_bss if remaining is zero */
-	lw a1, 16(a5)              /* src = rt_header.data_flash_start */
-	lw a2, 20(a5)              /* dest = rt_header.data_ram_start */
-.Ldata_loop_body:
-	lw a3, 0(a1)               /* a3 = *src */
-	sw a3, 0(a2)               /* *dest = a3 */
-	addi a0, a0, -4            /* remaining -= 4 */
-	addi a1, a1, 4             /* src += 4 */
-	addi a2, a2, 4             /* dest += 4 */
-	bnez a0, .Ldata_loop_body  /* Iterate again if remaining != 0 */
+    /* Debug support, tell the kernel the stack location
+     *
+     * memop(10, stacktop);
+	 */
+    li  a4, 5
+    li  a0, 10
+    mv  a1, s1
+    ecall
+    
+    /* Debug support, tell the kernel the heap location
+     *
+     * memop(11, app_brk);
+	 */
+    li  a4, 5
+    li  a0, 11
+    mv  a1, t1
+    ecall
 
-.Lzero_bss:
-	lw a0, 24(a5)               /* remaining = rt_header.bss_size */
-	beqz a0, .Lcall_rust_start  /* Jump to call_Main if remaining is zero */
-	lw a1, 28(a5)               /* dest = rt_header.bss_start */
-.Lbss_loop_body:
-	sb zero, 0(a1)              /* *dest = zero */
-	addi a0, a0, -1             /* remaining -= 1 */
-	addi a1, a1, 1              /* dest += 1 */
-	bnez a0, .Lbss_loop_body    /* Iterate again if remaining != 0 */
+    /* Set gp, the ePIC base register. The ePIC code uses this as a reference
+     * point to enable the RAM section of the app to be at any address.
+	 */
+    mv   gp, s2
 
-.Lcall_rust_start:
-	/* Note: rust_start must be a diverging function (i.e. return `!`) */
-	jal rust_start
+    /* Call into the rest of startup. This should never return.
+	 */
+    mv   a0, s0
+    mv   s0, sp
+    mv   a1, s2
+    jal  rust_start

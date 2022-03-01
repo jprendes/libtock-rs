@@ -10,7 +10,8 @@
 //! ```
 //! [build]
 //! rustflags = [
-//!     "-C", "relocation-model=static",
+//!     "-C", "relocation-model=epic",
+//!     "-C", "link-arg=--emit-relocs",
 //!     "-C", "link-arg=-Tlayout.ld",
 //! ]
 //! ```

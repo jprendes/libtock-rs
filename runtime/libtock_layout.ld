@@ -1,137 +1,191 @@
-/* Layout file for Tock process binaries that use libtock-rs. This currently
- * implements static linking, because we do not have a working
- * position-independent relocation solution. This layout works for all
- * platforms libtock-rs supports (ARM and RISC-V).
- *
- * This layout should be included by a script that defines the FLASH and RAM
- * regions for the board as well as TBF_HEADER_SIZE. Here is a an example
- * process binary linker script to get started:
- *     MEMORY {
- *         FLASH (X) : ORIGIN = 0x10000, LENGTH = 0x10000
- *         RAM   (W) : ORIGIN = 0x20000, LENGTH = 0x10000
- *     }
- *     TBF_HEADER_SIZE = 0x48;
- *     INCLUDE ../libtock-rs/layout.ld
- *
- * FLASH refers to the area the process binary occupies in flash, including TBF
- * headers. RAM refers to the area the process will have access to in memory.
- * STACK_SIZE is the size of the process' stack (this layout file may round the
- * stack size up for alignment purposes). TBF_HEADER_SIZE must correspond to the
- * --protected-region-size flag passed to elf2tab.
- *
- * This places the flash sections in the following order:
- *     1. .rt_header -- Constants used by runtime initialization.
- *     2. .text      -- Executable code.
- *     3. .rodata    -- Read-only global data (e.g. most string constants).
- *     4. .data      -- Read-write data, copied to RAM at runtime.
- *
- * This places the RAM sections in the following order:
- *     1. .stack -- The stack grows downward. Putting it first gives us
- *                  MPU-based overflow detection.
- *     2. .data  -- Read-write data, initialized by copying from flash.
- *     3. .bss   -- Zero-initialized read-write global data.
- *     4. Heap   -- The heap (optional) comes after .bss and grows upwards to
- *                  the process break.
+/* Userland Generic Layout
  */
 
-/* TODO: Should TBF_HEADER_SIZE be configured via a similar mechanism to the
- * stack size? We should see if that is possible.
- */
 
-/* GNU LD looks for `start` as an entry point by default, while LLVM's LLD looks
- * for `_start`. To be compatible with both, we manually specify an entry point.
- */
 ENTRY(start)
 
+/* Note: On platforms where apps are position-independent and relocatable, the
+ * FLASH address here acts as a sentinel value for relocation fixup routines.
+ * The application loader will select the actual location in flash where the app
+ * is placed. On platforms where apps are compiled for fixed addresses, these
+ * addresses will be changed automatically before the linking step.
+ */
+MEMORY {
+    FLASH (rx) : ORIGIN = 0x80000000, LENGTH = PROG_LENGTH
+    SRAM (RWX) : ORIGIN = 0x00000000, LENGTH = RAM_LENGTH
+}
+
 SECTIONS {
-    /* Sections located in FLASH at runtime.
+    /* Section for just the app crt0 header.
+     * This must be first so that the app can find it.
      */
-
-    /* Add a section where elf2tab will place the TBF headers, so that the rest
-     * of the FLASH sections are in the right locations. */
-    .tbf_header (NOLOAD) : {
-        . = . + TBF_HEADER_SIZE;
-    } > FLASH
-
-    /* Runtime header. Contains values the linker knows that the runtime needs
-     * to look up.
-     */
-    .start ALIGN(4) : {
-        /* We combine rt_header and _start into a single section. If we don't,
-         * elf2tab does not parse the ELF file correctly for unknown reasons.
+    .crt0_header :
+    {
+        /**
+         * Populate the header expected by `crt0`:
+         *
+         *  struct hdr {
+         *    uint32_t got_sym_start;
+         *    uint32_t got_start;
+         *    uint32_t got_size;
+         *    uint32_t data_sym_start;
+         *    uint32_t data_start;
+         *    uint32_t data_size;
+         *    uint32_t bss_start;
+         *    uint32_t bss_size;
+         *    uint32_t reldata_start;
+         *    uint32_t stack_size;
+         *  };
          */
-        rt_header = .;
-        LONG(start);
-        LONG(ADDR(.bss) + SIZEOF(.bss)); /* Initial process break */
-        LONG(_stack_top);
+        /* Offset of GOT symbols in flash from the start of the application
+         * binary. */
+        LONG(LOADADDR(.got) - ORIGIN(FLASH));
+        /* Offset of where the GOT section will be placed in memory from the
+         * beginning of the app's assigned memory. */
+        LONG(_got - ORIGIN(SRAM));
+        /* Size of GOT section. */
+        LONG(SIZEOF(.got));
+        /* Offset of data symbols in flash from the start of the application
+         * binary. */
+        LONG(LOADADDR(.data) - ORIGIN(FLASH));
+        /* Offset of where the data section will be placed in memory from the
+         * beginning of the app's assigned memory. */
+        LONG(_data - ORIGIN(SRAM));
+        /* Size of data section. */
         LONG(SIZEOF(.data));
-        LONG(LOADADDR(.data));
-        LONG(ADDR(.data));
+        /* Offset of where the BSS section will be placed in memory from the
+         * beginning of the app's assigned memory. */
+        LONG(_bss - ORIGIN(SRAM));
+        /* Size of BSS section */
         LONG(SIZEOF(.bss));
-        LONG(ADDR(.bss));
+        /* First address offset after program flash, where elf2tab places
+         * .rel.data section */
+        LONG(LOADADDR(.endflash) - ORIGIN(FLASH));
+        /* The size of the stack requested by this application */
+        LONG(SIZEOF(.stack));
+    } > FLASH =0xFF
 
-        *(.start)
-    } > FLASH
+    /* App state section. Used for persistent app data.
+     * We put this first so that if the app code changes but the persistent
+     * data doesn't, the app_state can be preserved.
+     */
+    .wfr.app_state :
+    {
+        KEEP (*(.app_state))
+        . = ALIGN(4); /* Make sure we're word-aligned here */
+    } > FLASH =0xFF
 
-    /* Text section -- the application's code. */
-    .text ALIGN(4) : {
-        *(.text.*)
-    } > FLASH
+    /* Text section, Code! */
+    .text :
+    {
+        . = ALIGN(4);
+        _text = .;
+        KEEP (*(.start))
+        *(.text*)
+        *(.rodata*)
+        *(.srodata*) /* for RISC-V */
+        KEEP (*(.syscalls))
+        _etext = .;
+        *(.ARM.extab*)
+        . = ALIGN(4); /* Make sure we're word-aligned here */
+    } > FLASH =0xFF
 
-    /* Read-only data section. Contains strings and other global constants. */
-    .rodata ALIGN(4) : {
-        *(.rodata.*)
-        /* .data is placed after .rodata in flash. data_flash_start is used by
-         * AT() to place .data in flash as well as in rt_header.
+    /* Need to reserve room for the stack in the linker file. This makes the
+     * _got addresses used by the compiler match what they will be when the
+     * app is loaded into memory. This is not necessary for full PIC supported
+     * platforms (like Cortex-M), but is needed when an app is compiled for a
+     * fixed address.
+     */
+    .stack (NOLOAD) :
+    {
+        /* elf2tab requires that the `_SRAM_ORIGIN` symbol be present to
+		 * mark the first address in the SRAM memory. Since ELF files do
+		 * not really need to specify this address as they only care about
+		 * loading into flash, we need to manually mark this address for
+		 * elf2tab. elf2tab will use it to add a fixed address header in the
+		 * TBF header if needed.
+		 */
+	    _sram_origin = .;
+
+        /* Be conservative about our alignment for the stack. Different
+         * architectures require different values (8 for ARM, 16 for RISC-V),
+         * so we choose the largest value. In practice, this likely will not
+         * matter since the start of SRAM is unlikely to be at a very peculiar
+         * address.
          */
-        _data_flash_start = .;
-    } > FLASH
-
-    /* Sections located in RAM at runtime.
-     */
-
-    /* Reserve space for the stack. Aligned to a multiple of 16 bytes for the
-     * RISC-V calling convention:
-     * https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf
-     */
-    .stack (NOLOAD) : {
-	/* _sram_origin is used by elf2tab:
-	 * https://github.com/tock/elf2tab/blob/master/src/main.rs#L301
-	 */
-        _sram_origin = .;
+        . = ALIGN(16);
         KEEP(*(.stack_buffer))
         . = ALIGN(16);
-        _stack_top = .;  /* Used in rt_header */
-    } > RAM
+    } > SRAM
 
-    /* Read-write data section. This is deployed as part of FLASH but is copied
-     * into RAM at runtime.
-     */
-    .data ALIGN(4) : AT(_data_flash_start) {
-        data_ram_start = .;
-        /* .sdata is the RISC-V small data section */
-        *(.sdata .data)
-        /* Pad to word alignment so the relocation loop can use word-sized
-         * copies.
-         */
-        . = ALIGN(4);
-    } > RAM
 
-    /* BSS section. These are zero-initialized static variables. This section is
-     * not copied from FLASH into RAM but rather directly initialized, and is
-     * mainly put in this linker script so that we get an error if it overflows
-     * the RAM region.
-     */
-    .bss ALIGN(4) (NOLOAD) : {
-        /* .sbss is the RISC-V small data section */
-        *(.sbss .bss.*)
-    } > RAM
-
-    _heap_start = ADDR(.bss) + SIZEOF(.bss);  /* Used by rt_header */
-
-    /* Sections we do not need. */
-    /DISCARD/ :
+    /* Global Offset Table */
+    .got :
     {
-      *(.ARM.exidx .eh_frame)
-    }
+        . = ALIGN(4); /* Make sure we're word-aligned here */
+        _got = .;
+        *(.got*)
+        *(.got.plt*)
+        . = ALIGN(4);
+    } > SRAM AT > FLASH
+
+    /* Data section, static initialized variables
+     *  Note: This is placed in Flash after the text section, but needs to be
+     *  moved to SRAM at runtime
+     */
+    .data :
+    {
+        . = ALIGN(4); /* Make sure we're word-aligned here */
+        _data = .;
+        KEEP(*(.data*))
+        /* Include the "small data" in the data section. Otherwise it will be
+         * dropped when the TBF is created.
+         */
+        KEEP(*(.sdata*))
+        . = ALIGN(4); /* Make sure we're word-aligned at the end of flash */
+    } > SRAM AT > FLASH
+
+    /* BSS section, static uninitialized variables */
+    .bss :
+    {
+        . = ALIGN(4); /* Make sure we're word-aligned here */
+        _bss = .;
+        KEEP(*(.bss*))
+        KEEP(*(.sbss*)) /* for RISC-V */
+        *(COMMON)
+        . = ALIGN(4);
+    } > SRAM
+
+    /* End of flash. */
+    .endflash :
+    {
+    } > FLASH
+
+    /* ARM Exception support
+     *
+     * This contains compiler-generated support for unwinding the stack,
+     * consisting of key-value pairs of function addresses and information on
+     * how to unwind stack frames.
+     * https://wiki-archive.linaro.org/KenWerner/Sandbox/libunwind
+     * (See also https://github.com/tock/libtock-c/issues/48)
+     *
+     *
+     * .ARM.exidx is sorted, so has to go in its own output section.
+     *
+     * __NOTE__: It's at the end because we currently don't actually serialize
+     * it to the binary in elf2tab. If it was before the RAM sections, it would
+     * through off our calculations of the header.
+     */
+    PROVIDE_HIDDEN (__exidx_start = .);
+    .ARM.exidx :
+    {
+      /* (C++) Index entries for section unwinding */
+      *(.ARM.exidx* .gnu.linkonce.armexidx.*)
+    } > FLASH
+    PROVIDE_HIDDEN (__exidx_end = .);
 }
+
+ASSERT(_got <= _bss, "
+The GOT section must be before the BSS section for crt0 setup to be correct.");
+ASSERT(_data <= _bss, "
+The data section must be before the BSS section for crt0 setup to be correct.");
