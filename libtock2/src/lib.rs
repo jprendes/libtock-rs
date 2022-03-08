@@ -19,3 +19,4 @@ pub mod low_level_debug {
     pub type LowLevelDebug = lldb::LowLevelDebug<super::runtime::TockSyscalls>;
     pub use lldb::AlertCode;
 }
+pub mod console;
