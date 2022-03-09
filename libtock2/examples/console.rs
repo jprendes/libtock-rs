@@ -16,8 +16,27 @@ static mut RESULT_REF: *const u64 = unsafe { core::ptr::addr_of!(RESULT) };
 static HELLO_WORLD: &str = "Hello World!";
 static mut HELLO_WORLD_REF: *const &str = core::ptr::addr_of!(HELLO_WORLD);
 
+#[derive(uDebug)]
+struct Test<'a> {
+    a: u32,
+    b: u64,
+    c: &'a str,
+}
+
 fn main() {
     unsafe {
+        println!();
+
+        let test = Test {
+            a: 123,
+            b: 456,
+            c: "Hello World!",
+        };
+
+        println!("test.c.as_ptr() = {:#x}", test.c.as_ptr() as u32);
+        println!("HELLO_WORLD.as_ptr() = {:#x}", HELLO_WORLD.as_ptr() as u32);
+        // Uncommenting the following line results in a "fixup value out of range" error
+        //println!("test = {:#?}", test);
         println!();
 
         println!("Content in Flash");
