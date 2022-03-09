@@ -108,11 +108,16 @@ struct rela {
     addend: u32,
 }
 
-#[repr(C)]
-#[derive(ufmt::derive::uDebug)]
-struct reladata<'a> {
-    len: usize,
-    data: &'a [rela]
+unsafe fn make_slice<'a, T>(base: u32, offset: u32, num_bytes: u32) -> &'a [T] {
+    unsafe {
+        core::slice::from_raw_parts((base + offset) as *const T, num_bytes as usize / core::mem::size_of::<T>())
+    }
+}
+
+unsafe fn make_slice_mut<'a, T>(base: u32, offset: u32, num_bytes: u32) -> &'a mut [T] {
+    unsafe {
+        core::slice::from_raw_parts_mut((base + offset) as *mut T, num_bytes as usize / core::mem::size_of::<T>())
+    }
 }
 
 // rust_start is the first Rust code to execute in the process. It is called
@@ -122,32 +127,28 @@ extern "C" fn rust_start(app_start: u32, mem_start: u32) -> ! {
     unsafe {
         let myhdr : &hdr = &*(app_start as *const hdr);
 
-        let got_len = myhdr.got_size as usize / core::mem::size_of::<u32>();
-        let got_start = core::slice::from_raw_parts_mut((myhdr.got_start + mem_start) as *mut u32, got_len);
-        let got_sym_start = core::slice::from_raw_parts((myhdr.got_sym_start + app_start) as *const u32, got_len);
+        let got_sram = make_slice_mut::<u32>(mem_start, myhdr.got_start, myhdr.got_size);
+        let got_flash = make_slice::<u32>(app_start, myhdr.got_sym_start, myhdr.got_size);
 
-        for i in 0..got_len {
-            if (got_sym_start[i] & 0x80000000) == 0 {
-                got_start[i] = got_sym_start[i] + mem_start;
+        for (sram_entry, flash_entry) in got_sram.iter_mut().zip(got_flash.iter()) {
+            *sram_entry = if (flash_entry & 0x80000000) == 0 {
+                flash_entry + mem_start
             } else {
-                got_start[i] = (got_sym_start[i] ^ 0x80000000) + app_start;
-            }
+                (flash_entry ^ 0x80000000) + app_start
+            };
         }
 
-        let data_size = myhdr.data_size as usize;
-        let data_start = (myhdr.data_start + mem_start) as *mut u8;
-        let data_sym_start = (myhdr.data_sym_start + app_start) as *const u8;
-        core::ptr::copy_nonoverlapping(data_sym_start, data_start, data_size);
+        let data_sram = make_slice_mut::<u8>(mem_start, myhdr.data_start, myhdr.data_size);
+        let data_flash = make_slice::<u8>(app_start, myhdr.data_sym_start, myhdr.data_size);
 
-        let bss_size = myhdr.bss_size as usize;
-        let bss_start = (myhdr.bss_start + mem_start) as *mut u8;
-        core::ptr::write_bytes(bss_start, 0, bss_size);
+        data_sram.clone_from_slice(data_flash);
 
-        let _rd : &reldata = &*((myhdr.reldata_start + app_start) as *const reldata);
-        let rd_len = _rd.len as usize / core::mem::size_of::<rela>();
-        let rd_data = core::slice::from_raw_parts(&_rd.data as *const rela, rd_len);
+        let bss_sram = make_slice_mut::<u8>(mem_start, myhdr.bss_start, myhdr.bss_size);
 
-        let rd = reladata { len: rd_len as usize, data: rd_data };
+        bss_sram.fill(0);
+
+        let rd : &reldata = &*((myhdr.reldata_start + app_start) as *const reldata);
+        let rd_data = make_slice::<rela>(app_start, myhdr.reldata_start + 4, rd.len);
 
         println!();
         println!();
@@ -156,27 +157,25 @@ extern "C" fn rust_start(app_start: u32, mem_start: u32) -> ! {
         println!("app_start = {:#x}", app_start);
         println!();
 
-        println!("Copy data: {:#x} bytes from {:#x} to {:#x}", data_size, data_sym_start as u32, data_start as u32);
-        println!("Zero init data: {:#x} bytes from {:#x}", bss_size, bss_start as u32);
+        println!("Copy data: {:#x} bytes from {:#?} to {:#?}", data_sram.len(), data_flash.as_ptr(), data_sram.as_ptr());
+        println!("Zero init data: {:#x} bytes from {:#?}", bss_sram.len(), bss_sram.as_ptr());
         println!();
 
         println!("Relocating things!");
         println!();
 
         println!("myhdr = {:#?}", myhdr);
-        println!("rd = {:#?}", rd);
         println!();
 
-        for rela{offset,..} in rd.data {
+        for rela{offset,..} in rd_data {
             let target = (offset + mem_start) as *mut u32;
             print!("Relocating {:#?} ({:#x}, target={:#x}) : {:#x} -> ", offset, offset, offset + mem_start, *target);
-            if (*target & 0x80000000) == 0 {
-                //core::ptr::write_volatile(target, core::ptr::read_volatile(target) + mem_start);
-                *target += mem_start;
+            *target = if (*target & 0x80000000) == 0 {
+                *target + mem_start
             } else {
                 //core::ptr::write_volatile(target, (core::ptr::read_volatile(target) ^ 0x80000000) + app_start);
-                *target = (*target ^ 0x80000000) + app_start;
-            }
+                (*target ^ 0x80000000) + app_start
+            };
             println!("{:#x}", *target);
         }
 
