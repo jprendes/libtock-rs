@@ -5,6 +5,7 @@
 
 use libtock2::println;
 use libtock2::runtime::{set_main, stack_size};
+use ufmt::derive::uDebug;
 
 set_main! {main}
 stack_size! {0x300}
@@ -35,12 +36,15 @@ fn main() {
         );
         println!();
         println!("  HELLO_WORLD      = {}", HELLO_WORLD);
-        println!("  *HELLO_WORLD_REF = {}", *(HELLO_WORLD_REF as *const u8));
+        println!("  *HELLO_WORLD_REF = {}", *(HELLO_WORLD_REF as *const &str));
         println!();
 
         println!("Content in RAM");
         println!("  &RESULT     = {:#x}", core::ptr::addr_of!(RESULT) as u32);
-        println!("  &RESULT_REF = {:#x}", core::ptr::addr_of!(RESULT_REF) as u32);
+        println!(
+            "  &RESULT_REF = {:#x}",
+            core::ptr::addr_of!(RESULT_REF) as u32
+        );
         println!();
         println!("  RESULT_REF  = {:#x}", RESULT_REF as u32);
         println!();
