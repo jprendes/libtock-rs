@@ -129,14 +129,6 @@ SECTIONS {
         . = ALIGN(4);
     } > SRAM AT > FLASH
 
-    /* Padding section to workaround what looks like a bug in the linker
-     * Without this section the LOADADDR(.data) below is sporadically wrong by 4 bytes
-     */
-    .padding :
-    {
-        _padding = .;
-    } > SRAM AT > FLASH
-
     /* Data section, static initialized variables
      *  Note: This is placed in Flash after the text section, but needs to be
      *  moved to SRAM at runtime
