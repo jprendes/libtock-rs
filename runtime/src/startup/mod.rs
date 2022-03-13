@@ -55,11 +55,7 @@ macro_rules! stack_size {
     }
 }
 
-mod console;
-use crate::{print, println};
-
 #[repr(C)]
-#[derive(ufmt::derive::uDebug)]
 struct hdr {
     //  0: Offset of GOT symbols in flash from the start of the application
     //     binary.
@@ -101,7 +97,6 @@ struct reldata {
 }
 
 #[repr(C)]
-#[derive(ufmt::derive::uDebug)]
 struct rela {
     offset: u32,
     info: u32,
@@ -110,13 +105,19 @@ struct rela {
 
 unsafe fn make_slice<'a, T>(base: u32, offset: u32, num_bytes: u32) -> &'a [T] {
     unsafe {
-        core::slice::from_raw_parts((base + offset) as *const T, num_bytes as usize / core::mem::size_of::<T>())
+        core::slice::from_raw_parts(
+            (base + offset) as *const T,
+            num_bytes as usize / core::mem::size_of::<T>(),
+        )
     }
 }
 
 unsafe fn make_slice_mut<'a, T>(base: u32, offset: u32, num_bytes: u32) -> &'a mut [T] {
     unsafe {
-        core::slice::from_raw_parts_mut((base + offset) as *mut T, num_bytes as usize / core::mem::size_of::<T>())
+        core::slice::from_raw_parts_mut(
+            (base + offset) as *mut T,
+            num_bytes as usize / core::mem::size_of::<T>(),
+        )
     }
 }
 
@@ -125,7 +126,7 @@ unsafe fn make_slice_mut<'a, T>(base: u32, offset: u32, num_bytes: u32) -> &'a m
 #[no_mangle]
 extern "C" fn rust_start(app_start: u32, mem_start: u32) -> ! {
     unsafe {
-        let myhdr : &hdr = &*(app_start as *const hdr);
+        let myhdr: &hdr = &*(app_start as *const hdr);
 
         let got_sram = make_slice_mut::<u32>(mem_start, myhdr.got_start, myhdr.got_size);
         let got_flash = make_slice::<u32>(app_start, myhdr.got_sym_start, myhdr.got_size);
@@ -147,39 +148,17 @@ extern "C" fn rust_start(app_start: u32, mem_start: u32) -> ! {
 
         bss_sram.fill(0);
 
-        let rd : &reldata = &*((myhdr.reldata_start + app_start) as *const reldata);
+        let rd: &reldata = &*((myhdr.reldata_start + app_start) as *const reldata);
         let rd_data = make_slice::<rela>(app_start, myhdr.reldata_start + 4, rd.len);
 
-        println!();
-        println!();
-        
-        println!("mem_start = {:#x}", mem_start);
-        println!("app_start = {:#x}", app_start);
-        println!();
-
-        println!("Copy data: {:#x} bytes from {:#?} to {:#?}", data_sram.len(), data_flash.as_ptr(), data_sram.as_ptr());
-        println!("Zero init data: {:#x} bytes from {:#?}", bss_sram.len(), bss_sram.as_ptr());
-        println!();
-
-        println!("Relocating things!");
-        println!();
-
-        println!("myhdr = {:#?}", myhdr);
-        println!();
-
-        for rela{offset,..} in rd_data {
+        for rela { offset, .. } in rd_data {
             let target = (offset + mem_start) as *mut u32;
-            print!("Relocating {:#?} ({:#x}, target={:#x}) : {:#x} -> ", offset, offset, offset + mem_start, *target);
             *target = if (*target & 0x80000000) == 0 {
                 *target + mem_start
             } else {
-                //core::ptr::write_volatile(target, (core::ptr::read_volatile(target) ^ 0x80000000) + app_start);
                 (*target ^ 0x80000000) + app_start
             };
-            println!("{:#x}", *target);
         }
-
-        println!("Done relocating things!");
     }
 
     extern "Rust" {
