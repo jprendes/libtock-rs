@@ -49,6 +49,7 @@ macro_rules! set_main {
 #[macro_export]
 macro_rules! stack_size {
     {$size:expr} => {
+        #[used]
         #[no_mangle]
         #[link_section = ".stack_buffer"]
         pub static mut STACK_MEMORY: [u8; $size] = [0; $size];
