@@ -35,8 +35,7 @@ fn main() {
 
         println!("test.c.as_ptr() = {:#x}", test.c.as_ptr() as u32);
         println!("HELLO_WORLD.as_ptr() = {:#x}", HELLO_WORLD.as_ptr() as u32);
-        // Uncommenting the following line results in a "fixup value out of range" error
-        //println!("test = {:#?}", test);
+        println!("test = {:#?}", test);
         println!();
 
         println!("Content in Flash");
