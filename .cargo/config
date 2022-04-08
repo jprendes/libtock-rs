@@ -13,6 +13,5 @@ rustflags = [
     "-C", "link-arg=--lto-epic",
     "-C", "link-arg=--emit-relocs",
     "-C", "link-arg=-Tlayout.ld",
-    "-C", "linker-plugin-lto",
 ]
 runner = ["cargo", "run", "-p", "runner", "--release"]
